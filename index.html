@@ -1,0 +1,1020 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Switch } from "@/components/ui/switch";
+import { Trash2, Plus, Upload, Download, PieChart as PieChartIcon, Calendar, Target, Settings, Wallet, CreditCard, TrendingUp, AlertTriangle, Repeat } from "lucide-react";
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip as ReTooltip, XAxis, YAxis } from "recharts";
+import { format } from "date-fns";
+
+// ------------------------------
+// Utilities
+// ------------------------------
+const currency = (n, c = "£") => `${c}${Number(n || 0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})}`;
+const uid = () => Math.random().toString(36).slice(2);
+const todayISO = () => new Date().toISOString().slice(0,10);
+const ym = (d) => (d instanceof Date ? d : new Date(d)).toISOString().slice(0,7);
+const daysInMonth = (year, month) => new Date(year, month, 0).getDate(); // month 1-12
+
+// CSV helpers (robust export + import)
+const csvEscape = (val) => {
+  const s = String(val ?? "");
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+};
+function parseCSVLine(line) {
+  const out = []; let cur = ""; let inQ = false;
+  for (let i=0;i<line.length;i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (line[i+1] === '"') { cur += '"'; i++; } else { inQ = false; }
+      } else cur += ch;
+    } else {
+      if (ch === ',') { out.push(cur); cur = ""; }
+      else if (ch === '"') { inQ = true; }
+      else cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+// ------------------------------
+// Local Storage Hook
+// ------------------------------
+function useLocalState(key, initial) {
+  const [state, setState] = useState(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : initial;
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(key, JSON.stringify(state)); } catch {}
+  }, [key, state]);
+  return [state, setState];
+}
+
+// ------------------------------
+// Default seed data
+// ------------------------------
+const DEFAULT_CATEGORY_GROUPS = [
+  { id: uid(), name: "Essentials", categories: [
+    { id: uid(), name: "Rent", budget: 800 },
+    { id: uid(), name: "Groceries", budget: 250 },
+    { id: uid(), name: "Utilities", budget: 120 },
+  ]},
+  { id: uid(), name: "Lifestyle", categories: [
+    { id: uid(), name: "Dining Out", budget: 120 },
+    { id: uid(), name: "Entertainment", budget: 80 },
+  ]},
+  { id: uid(), name: "Savings", categories: [
+    { id: uid(), name: "Emergency Fund", budget: 200 },
+  ]}
+];
+
+const DEFAULT_ACCOUNTS = [
+  { id: uid(), name: "Current Account", type: "Bank", balance: 2000, currency: "GBP" },
+  { id: uid(), name: "Savings", type: "Savings", balance: 5000, currency: "GBP" },
+  { id: uid(), name: "Credit Card", type: "Credit", balance: -300, currency: "GBP" },
+];
+
+const DEFAULT_BILLS = [
+  { id: uid(), name: "Rent", amount: 800, dueDay: 1, auto: true },
+  { id: uid(), name: "Electricity", amount: 60, dueDay: 15, auto: false },
+];
+
+const DEFAULT_GOALS = [
+  { id: uid(), name: "Holiday Fund", target: 1500, saved: 250, deadline: new Date().getFullYear()+"-12-31" },
+];
+
+const DEFAULT_RECURRING = [
+  { id: uid(), name: "Salary", type: "income", amount: 2000, dayOfMonth: 25, accountId: null, categoryId: null, note: "Monthly salary", isEnabled: true },
+  { id: uid(), name: "Gym", type: "expense", amount: 25, dayOfMonth: 5, accountId: null, categoryId: null, note: "Membership", isEnabled: true },
+];
+
+// ------------------------------
+// Root App
+// ------------------------------
+export default function BudgetApp() {
+  // Global Settings
+  const [profile, setProfile] = useLocalState("mf_profile", { name: "You", currency: "£", month: new Date().toISOString().slice(0,7) });
+
+  // Core Data Stores
+  const [accounts, setAccounts] = useLocalState("mf_accounts", DEFAULT_ACCOUNTS);
+  const [groups, setGroups] = useLocalState("mf_groups", DEFAULT_CATEGORY_GROUPS);
+  const [transactions, setTransactions] = useLocalState("mf_txns", []);
+  const [bills, setBills] = useLocalState("mf_bills", DEFAULT_BILLS);
+  const [goals, setGoals] = useLocalState("mf_goals", DEFAULT_GOALS);
+  const [recurring, setRecurring] = useLocalState("mf_recurring", DEFAULT_RECURRING);
+
+  // Derived
+  const monthKey = profile.month; // YYYY-MM
+  const monthTxns = useMemo(() => transactions.filter(t => (t.date||"").slice(0,7) === monthKey), [transactions, monthKey]);
+
+  const monthIncome = useMemo(() => monthTxns.filter(t=>t.type==='income').reduce((a,b)=>a+Number(b.amount),0), [monthTxns]);
+  const monthExpense = useMemo(() => monthTxns.filter(t=>t.type==='expense').reduce((a,b)=>a+Number(b.amount),0), [monthTxns]);
+
+  const categorySpend = useMemo(() => {
+    const map = {};
+    for (const g of groups) for (const c of g.categories) map[c.id] = { name: c.name, budget: Number(c.budget||0), spent: 0 };
+    for (const t of monthTxns.filter(t=>t.type==='expense' && t.categoryId)) {
+      if (map[t.categoryId]) map[t.categoryId].spent += Number(t.amount);
+    }
+    return Object.values(map);
+  }, [groups, monthTxns]);
+
+  const warnings = useMemo(() => {
+    const arr = [];
+    categorySpend.forEach(c => {
+      if (c.spent > c.budget && c.budget > 0) arr.push({ level: "over", msg: `${c.name} is over budget by ${currency(c.spent - c.budget, profile.currency)}`});
+      if (c.budget > 0 && c.spent > 0.9*c.budget && c.spent <= c.budget) arr.push({ level: "near", msg: `${c.name} is nearing budget limit.`});
+    });
+    return arr;
+  }, [categorySpend, profile.currency]);
+
+  const netWorthSeries = useMemo(() => {
+    const months = [];
+    const start = new Date();
+    start.setMonth(start.getMonth() - 11);
+    const base = accounts.reduce((a,b)=>a+Number(b.balance||0),0);
+    let running = base;
+    for (let i=0;i<12;i++) {
+      const d = new Date(start.getFullYear(), start.getMonth()+i, 1);
+      const key = d.toISOString().slice(0,7);
+      const delta = transactions.filter(t => (t.date||"").slice(0,7)===key)
+        .reduce((a,b)=>a + (b.type==='income' ? Number(b.amount) : b.type==='expense' ? -Number(b.amount) : 0), 0);
+      running += delta;
+      months.push({ month: format(d, "MMM yyyy"), value: Number(running.toFixed(2)) });
+    }
+    return months;
+  }, [accounts, transactions]);
+
+  // ------------------------------
+  // Recurring materialization (monthly)
+  // ------------------------------
+  useEffect(() => {
+    materializeRecurring(monthKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [monthKey, JSON.stringify(recurring)]);
+
+  function materializeRecurring(key){
+    const [y, m] = key.split("-").map(Number);
+    const dim = daysInMonth(y, m);
+    const toAdd = [];
+    recurring.filter(r=>r.isEnabled).forEach(r => {
+      const day = Math.min(Math.max(1, Number(r.dayOfMonth||1)), 31);
+      const actualDay = Math.min(day, dim);
+      const date = `${key}-${String(actualDay).padStart(2,'0')}`;
+      const exists = transactions.some(t => t.meta?.recurringId === r.id && (t.date||"").slice(0,10) === date);
+      if (!exists) {
+        toAdd.push({ id: uid(), date, type: r.type, amount: Number(r.amount||0), accountId: r.accountId||undefined, categoryId: r.categoryId||undefined, note: r.note||r.name, meta: { recurringId: r.id } });
+      }
+    });
+    if (toAdd.length) setTransactions(prev => [...toAdd, ...prev]);
+  }
+
+  // ------------------------------
+  // CRUD helpers
+  // ------------------------------
+  const addTxn = (txn) => setTransactions(prev => [{ id: uid(), ...txn }, ...prev]);
+  const delTxn = (id) => setTransactions(prev => prev.filter(t=>t.id!==id));
+
+  const addAccount = (a) => setAccounts(prev => [...prev, { id: uid(), balance: 0, currency: "GBP", ...a }]);
+  const delAccount = (id) => setAccounts(prev => prev.filter(a=>a.id!==id));
+
+  const addGroup = (name) => setGroups(prev => [...prev, { id: uid(), name, categories: [] }]);
+  const addCategory = (groupId, name, budget=0) => setGroups(prev => prev.map(g => g.id===groupId ? { ...g, categories: [...g.categories, { id: uid(), name, budget:Number(budget) }] } : g));
+  const updateCategoryBudget = (catId, budget) => setGroups(prev => prev.map(g=> ({...g, categories: g.categories.map(c => c.id===catId ? { ...c, budget:Number(budget) } : c)})));
+  const delCategory = (catId) => setGroups(prev => prev.map(g=> ({...g, categories: g.categories.filter(c=>c.id!==catId)})));
+
+  const addBill = (b) => setBills(prev => [...prev, { id: uid(), ...b }]);
+  const delBill = (id) => setBills(prev => prev.filter(b=>b.id!==id));
+
+  const addGoal = (g) => setGoals(prev => [...prev, { id: uid(), ...g }]);
+  const updateGoal = (id, patch) => setGoals(prev => prev.map(g=>g.id===id?{...g, ...patch}:g));
+  const delGoal = (id) => setGoals(prev => prev.filter(g=>g.id!==id));
+
+  const addRecurring = (r) => setRecurring(prev => [...prev, { id: uid(), isEnabled: true, ...r }]);
+  const updateRecurring = (id, patch) => setRecurring(prev => prev.map(r=>r.id===id?{...r, ...patch}:r));
+  const delRecurring = (id) => setRecurring(prev => prev.filter(r=>r.id!==id));
+
+  // ------------------------------
+  // CSV Import/Export (fixed unterminated regex + robust CSV)
+  // ------------------------------
+  const sanitizeNote = (s) => String(s || "").replace(/[\r\n]+/g, " ");
+
+  const exportCSV = () => {
+    const rows = [
+      ["id","date","type","amount","accountId","categoryId","note"],
+      ...transactions.map(t=>[
+        t.id,
+        t.date,
+        t.type,
+        t.amount,
+        t.accountId||"",
+        t.categoryId||"",
+        sanitizeNote(t.note)
+      ])
+    ];
+    const csv = rows.map(r=>r.map(csvEscape).join(",")).join("\n");
+    const blob = new Blob([csv], { type:"text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `myfinance-transactions-${Date.now()}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importCSV = async (file) => {
+    const text = await file.text();
+    const [header, ...lines] = text.split(/\r?\n/).filter(Boolean);
+    const cols = parseCSVLine(header);
+    const idx = (k) => cols.indexOf(k);
+    const parsed = lines.map(line => {
+      const parts = parseCSVLine(line);
+      return {
+        id: parts[idx("id")] || uid(),
+        date: parts[idx("date")] || todayISO(),
+        type: parts[idx("type")] || "expense",
+        amount: Number(parts[idx("amount")]||0),
+        accountId: parts[idx("accountId")] || undefined,
+        categoryId: parts[idx("categoryId")] || undefined,
+        note: parts[idx("note")] || "",
+      };
+    });
+    setTransactions(prev => [...parsed, ...prev]);
+  };
+
+  // ------------------------------
+  // Self-tests (non-intrusive) – logs to console
+  // ------------------------------
+  useEffect(() => {
+    try { runSelfTests(); } catch (e) { console.error("Self-tests failed to run", e); }
+  }, []);
+
+  function runSelfTests(){
+    // 1) Regex/newline sanitation
+    console.assert(sanitizeNote("hello\nworld") === "hello world", "Sanitize should replace newlines with space");
+    console.assert(sanitizeNote("a\r\nb") === "a b", "Sanitize should handle CRLF");
+    // 2) CSV quoting
+    const esc = csvEscape('with,comma');
+    console.assert(/^".*"$/.test(esc), "CSV escape should quote comma fields");
+    const roundTrip = parseCSVLine(["a","b,c","d\"e"].map(csvEscape).join(","));
+    console.assert(roundTrip.length===3 && roundTrip[1]==="b,c" && roundTrip[2]==='d"e', "CSV parse round-trip");
+    // 3) Days-in-month + clamp
+    console.assert(daysInMonth(2025,2)===28, "Feb 2025 should have 28 days");
+    console.log("MyFinance self-tests passed ✔");
+  }
+
+  // ------------------------------
+  // Components
+  // ------------------------------
+  const SummaryTile = ({ title, value, icon:Icon, accent="from-sky-500 to-indigo-600" }) => (
+    <Card className="shadow-sm border-0 bg-gradient-to-br text-white overflow-hidden">
+      <CardHeader className={`flex flex-row items-center justify-between space-y-0 pb-2 bg-gradient-to-br ${accent}`}>
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+        {Icon && <Icon className="h-4 w-4"/ >}
+      </CardHeader>
+      <CardContent className="bg-white/90 text-zinc-900">
+        <div className="text-2xl font-bold">{value}</div>
+      </CardContent>
+    </Card>
+  );
+
+  const AddTxnDialog = () => {
+    const [open, setOpen] = useState(false);
+    const [form, setForm] = useState({ date: todayISO(), type: "expense", amount: 0, accountId: accounts[0]?.id, categoryId: undefined, note: "" });
+    const onSubmit = () => {
+      addTxn({ ...form, amount: Number(form.amount) });
+      setOpen(false);
+    };
+    return (
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogTrigger asChild>
+          <Button className="gap-2"><Plus className="h-4 w-4"/>Add Transaction</Button>
+        </DialogTrigger>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader><DialogTitle>Add Transaction</DialogTitle></DialogHeader>
+          <div className="grid gap-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Date</Label>
+                <Input type="date" value={form.date} onChange={e=>setForm({...form, date:e.target.value})}/>
+              </div>
+              <div>
+                <Label>Type</Label>
+                <Select value={form.type} onValueChange={(v)=>setForm({...form, type:v})}>
+                  <SelectTrigger><SelectValue/></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="income">Income</SelectItem>
+                    <SelectItem value="expense">Expense</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Amount</Label>
+                <Input type="number" inputMode="decimal" value={form.amount} onChange={e=>setForm({...form, amount:e.target.value})}/>
+              </div>
+              <div>
+                <Label>Account</Label>
+                <Select value={form.accountId} onValueChange={(v)=>setForm({...form, accountId:v})}>
+                  <SelectTrigger><SelectValue placeholder="Select account"/></SelectTrigger>
+                  <SelectContent>
+                    {accounts.map(a=> <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div>
+              <Label>Category (optional)</Label>
+              <Select value={form.categoryId} onValueChange={(v)=>setForm({...form, categoryId:v})}>
+                <SelectTrigger><SelectValue placeholder="Select category"/></SelectTrigger>
+                <SelectContent>
+                  {groups.flatMap(g=>g.categories.map(c=>({g:g.name, ...c}))).map(c => (
+                    <SelectItem key={c.id} value={c.id}>{c.g} • {c.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Note</Label>
+              <Input value={form.note} onChange={e=>setForm({...form, note:e.target.value})} placeholder="Optional"/>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={()=>setOpen(false)}>Cancel</Button>
+              <Button onClick={onSubmit}>Save</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
+  };
+
+  // ------------------------------
+  // UI
+  // ------------------------------
+  return (
+    <div className="min-h-screen bg-[radial-gradient(1200px_600px_at_0%_-10%,#c7d2fe_0,#fff_60%),radial-gradient(1000px_500px_at_100%_0%,#fecaca_0,#fff_60%)] text-zinc-900">
+      <div className="max-w-7xl mx-auto p-4 md:p-8">
+        <header className="flex items-center justify-between gap-4 mb-6">
+          <div>
+            <h1 className="text-3xl font-semibold bg-gradient-to-r from-indigo-600 via-fuchsia-600 to-rose-500 bg-clip-text text-transparent">MyFinance</h1>
+            <p className="text-sm text-zinc-600">Zero-based budgeting • Manual entry / CSV import • Local only • Recurring monthly transactions</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Input className="w-[140px]" type="month" value={profile.month} onChange={e=>setProfile({...profile, month:e.target.value})}/>
+            <Dialog>
+              <DialogTrigger asChild>
+                <Button variant="outline" className="gap-2"><Settings className="h-4 w-4"/>Settings</Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader><DialogTitle>Settings</DialogTitle></DialogHeader>
+                <div className="grid gap-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label>Name</Label>
+                      <Input value={profile.name} onChange={e=>setProfile({...profile, name:e.target.value})}/>
+                    </div>
+                    <div>
+                      <Label>Currency Symbol</Label>
+                      <Input value={profile.currency} onChange={e=>setProfile({...profile, currency:e.target.value})} maxLength={3}/>
+                    </div>
+                  </div>
+                  <div className="text-xs text-zinc-500">Data is stored in your browser using localStorage.</div>
+                </div>
+              </DialogContent>
+            </Dialog>
+          </div>
+        </header>
+
+        <Tabs defaultValue="dashboard" className="space-y-6">
+          <TabsList className="flex flex-wrap gap-2">
+            <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
+            <TabsTrigger value="budget">Budget</TabsTrigger>
+            <TabsTrigger value="transactions">Transactions</TabsTrigger>
+            <TabsTrigger value="accounts">Accounts</TabsTrigger>
+            <TabsTrigger value="bills">Bills</TabsTrigger>
+            <TabsTrigger value="goals">Goals</TabsTrigger>
+            <TabsTrigger value="recurring">Recurring</TabsTrigger>
+            <TabsTrigger value="settings">Categories</TabsTrigger>
+          </TabsList>
+
+          {/* DASHBOARD */}
+          <TabsContent value="dashboard" className="space-y-4">
+            <div className="grid md:grid-cols-4 gap-4">
+              <SummaryTile title="Income (month)" value={currency(monthIncome, profile.currency)} icon={TrendingUp} accent="from-emerald-500 to-teal-600" />
+              <SummaryTile title="Expenses (month)" value={currency(monthExpense, profile.currency)} icon={CreditCard} accent="from-rose-500 to-pink-600" />
+              <SummaryTile title="Left to Budget" value={currency(Math.max(0, monthIncome - categorySpend.reduce((a,b)=>a+b.budget,0)), profile.currency)} icon={PieChartIcon} accent="from-sky-500 to-indigo-600" />
+              <SummaryTile title="Net Worth" value={currency(accounts.reduce((a,b)=>a+Number(b.balance||0),0) + transactions.reduce((a,b)=> a + (b.type==='income'?Number(b.amount):b.type==='expense'?-Number(b.amount):0), 0), profile.currency)} icon={Wallet} accent="from-violet-500 to-fuchsia-600" />
+            </div>
+
+            {warnings.length>0 && (
+              <Card className="border-amber-300 bg-amber-50">
+                <CardHeader className="flex flex-row items-center gap-2 pb-2">
+                  <AlertTriangle className="h-5 w-5 text-amber-600"/>
+                  <CardTitle className="text-sm">Overspending Warnings</CardTitle>
+                </CardHeader>
+                <CardContent className="text-sm space-y-1">
+                  {warnings.map((w,i)=>(<div key={i}>• {w.msg}</div>))}
+                </CardContent>
+              </Card>
+            )}
+
+            <div className="grid lg:grid-cols-2 gap-4">
+              <Card>
+                <CardHeader><CardTitle>Net Worth Over Time</CardTitle></CardHeader>
+                <CardContent className="h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={netWorthSeries}>
+                      <defs>
+                        <linearGradient id="nw" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#6366f1" stopOpacity={0.35}/>
+                          <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="month" />
+                      <YAxis />
+                      <ReTooltip />
+                      <Area type="monotone" dataKey="value" stroke="#4f46e5" fillOpacity={1} fill="url(#nw)" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader><CardTitle>Spending by Category (This Month)</CardTitle></CardHeader>
+                <CardContent className="h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={categorySpend.map(c=>({ name:c.name, spent:c.spent, budget:c.budget }))}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="name" interval={0} angle={-20} textAnchor="end" height={60}/>
+                      <YAxis />
+                      <Legend />
+                      <ReTooltip />
+                      <Bar dataKey="spent" fill="#ef4444" />
+                      <Bar dataKey="budget" fill="#0ea5e9" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
+
+          {/* BUDGET */}
+          <TabsContent value="budget" className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Zero‑Based Monthly Budget — {format(new Date(`${monthKey}-01`), "LLLL yyyy")}</h2>
+              <AddTxnDialog />
+            </div>
+            <div className="grid gap-4">
+              {groups.map(g => (
+                <Card key={g.id} className="border-l-4 border-l-indigo-500">
+                  <CardHeader className="flex-row items-center justify-between">
+                    <CardTitle className="text-base">{g.name}</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    {g.categories.map(c => {
+                      const spent = categorySpend.find(x=>x.name===c.name)?.spent || 0;
+                      const remaining = Number(c.budget||0) - spent;
+                      return (
+                        <div key={c.id} className="grid grid-cols-12 items-center gap-2">
+                          <div className="col-span-4">{c.name}</div>
+                          <div className="col-span-3">
+                            <Label className="text-xs">Planned</Label>
+                            <Input type="number" value={c.budget} onChange={e=>updateCategoryBudget(c.id, e.target.value)} />
+                          </div>
+                          <div className="col-span-2">
+                            <div className="text-sm">Spent</div>
+                            <div className="text-zinc-600">{currency(spent, profile.currency)}</div>
+                          </div>
+                          <div className={`col-span-3 font-medium ${remaining<0?"text-red-600":"text-emerald-700"}`}>{remaining<0?"Over by ":"Left "}{currency(Math.abs(remaining), profile.currency)}</div>
+                          <Button size="icon" variant="ghost" onClick={()=>delCategory(c.id)}><Trash2 className="h-4 w-4"/></Button>
+                        </div>
+                      );
+                    })}
+                    <div className="pt-2">
+                      <Dialog>
+                        <DialogTrigger asChild>
+                          <Button variant="secondary" className="gap-2"><Plus className="h-4 w-4"/>Add Category</Button>
+                        </DialogTrigger>
+                        <DialogContent>
+                          <DialogHeader><DialogTitle>Add Category to {g.name}</DialogTitle></DialogHeader>
+                          <AddCategoryForm onSubmit={(name,budget)=>addCategory(g.id, name, budget)} />
+                        </DialogContent>
+                      </Dialog>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+              <div className="flex gap-2">
+                <Dialog>
+                  <DialogTrigger asChild>
+                    <Button variant="outline" className="gap-2"><Plus className="h-4 w-4"/>Add Category Group</Button>
+                  </DialogTrigger>
+                  <DialogContent>
+                    <DialogHeader><DialogTitle>Add Category Group</DialogTitle></DialogHeader>
+                    <AddGroupForm onSubmit={(name)=>addGroup(name)} />
+                  </DialogContent>
+                </Dialog>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button variant="outline" className="gap-2" onClick={exportCSV}><Download className="h-4 w-4"/>Export CSV</Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Export transactions</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <label className="inline-flex items-center gap-2 px-3 py-2 border rounded-md cursor-pointer text-sm">
+                  <Upload className="h-4 w-4"/> Import CSV
+                  <input type="file" accept=".csv" className="hidden" onChange={(e)=>e.target.files && importCSV(e.target.files[0])}/>
+                </label>
+              </div>
+            </div>
+          </TabsContent>
+
+          {/* TRANSACTIONS */}
+          <TabsContent value="transactions" className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Transactions — {format(new Date(`${monthKey}-01`), "LLLL yyyy")}</h2>
+              <AddTxnDialog />
+            </div>
+            <Card>
+              <CardContent className="p-0">
+                <div className="grid grid-cols-12 gap-2 px-4 py-3 border-b text-xs font-medium text-zinc-600">
+                  <div className="col-span-2">Date</div>
+                  <div className="col-span-2">Type</div>
+                  <div className="col-span-2">Account</div>
+                  <div className="col-span-3">Category / Note</div>
+                  <div className="col-span-2 text-right">Amount</div>
+                  <div className="col-span-1"/>
+                </div>
+                {monthTxns.length === 0 && (
+                  <div className="px-4 py-6 text-sm text-zinc-500">No transactions this month. Add one!</div>
+                )}
+                {monthTxns.map(t => (
+                  <div key={t.id} className="grid grid-cols-12 gap-2 px-4 py-3 border-b items-center">
+                    <div className="col-span-2">{t.date}</div>
+                    <div className="col-span-2 capitalize">{t.type}</div>
+                    <div className="col-span-2">{accounts.find(a=>a.id===t.accountId)?.name || "—"}</div>
+                    <div className="col-span-3 text-zinc-700">{groups.flatMap(g=>g.categories).find(c=>c.id===t.categoryId)?.name || "—"}{t.note?` — ${t.note}`:""}</div>
+                    <div className={`col-span-2 text-right ${t.type==='expense'?"text-red-600":"text-emerald-700"}`}>{t.type==='expense'?"-":"+"}{currency(t.amount, profile.currency)}</div>
+                    <div className="col-span-1 flex justify-end"><Button size="icon" variant="ghost" onClick={()=>delTxn(t.id)}><Trash2 className="h-4 w-4"/></Button></div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* ACCOUNTS */}
+          <TabsContent value="accounts" className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Accounts</h2>
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button className="gap-2"><Plus className="h-4 w-4"/>Add Account</Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader><DialogTitle>Add Account</DialogTitle></DialogHeader>
+                  <AddAccountForm onSubmit={(a)=>addAccount(a)} />
+                </DialogContent>
+              </Dialog>
+            </div>
+            <div className="grid md:grid-cols-3 gap-4">
+              {accounts.map(a => (
+                <Card key={a.id} className="border-t-4 border-t-emerald-500">
+                  <CardHeader className="flex flex-row justify-between items-center">
+                    <CardTitle className="text-base">{a.name}</CardTitle>
+                    <Button size="icon" variant="ghost" onClick={()=>delAccount(a.id)}><Trash2 className="h-4 w-4"/></Button>
+                  </CardHeader>
+                  <CardContent className="space-y-1">
+                    <div className="text-sm text-zinc-600">Type: {a.type}</div>
+                    <div className="text-2xl font-semibold">{currency(a.balance, profile.currency)}</div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </TabsContent>
+
+          {/* BILLS */}
+          <TabsContent value="bills" className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Bills</h2>
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button className="gap-2"><Plus className="h-4 w-4"/>Add Bill</Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader><DialogTitle>Add Bill</DialogTitle></DialogHeader>
+                  <AddBillForm onSubmit={(b)=>addBill(b)} />
+                </DialogContent>
+              </Dialog>
+            </div>
+            <Card>
+              <CardContent className="p-0">
+                <div className="grid grid-cols-12 gap-2 px-4 py-3 border-b text-xs font-medium text-zinc-600">
+                  <div className="col-span-4">Name</div>
+                  <div className="col-span-2">Amount</div>
+                  <div className="col-span-2">Due Day</div>
+                  <div className="col-span-2">Auto</div>
+                  <div className="col-span-2"/>
+                </div>
+                {bills.map(b => (
+                  <div key={b.id} className="grid grid-cols-12 gap-2 px-4 py-3 border-b items-center">
+                    <div className="col-span-4">{b.name}</div>
+                    <div className="col-span-2">{currency(b.amount, profile.currency)}</div>
+                    <div className="col-span-2">{b.dueDay}</div>
+                    <div className="col-span-2">{b.auto?"Yes":"No"}</div>
+                    <div className="col-span-2 flex justify-end"><Button size="icon" variant="ghost" onClick={()=>delBill(b.id)}><Trash2 className="h-4 w-4"/></Button></div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader><CardTitle className="flex items-center gap-2"><Calendar className="h-4 w-4"/> Monthly Calendar</CardTitle></CardHeader>
+              <CardContent className="grid grid-cols-7 gap-2">
+                {Array.from({length: 31}, (_,i)=>i+1).map(day => {
+                  const due = bills.filter(b=>b.dueDay===day);
+                  return (
+                    <div key={day} className="border rounded-md p-2 min-h-[64px] bg-white/60">
+                      <div className="text-xs text-zinc-500">{format(new Date(`${monthKey}-${String(day).padStart(2,'0')}`),"d LLL")}</div>
+                      {due.map(b => <div key={b.id} className="text-xs">• {b.name} {currency(b.amount, profile.currency)}</div>)}
+                    </div>
+                  );
+                })}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* GOALS */}
+          <TabsContent value="goals" className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Savings & Debt Goals</h2>
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button className="gap-2"><Plus className="h-4 w-4"/>Add Goal</Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader><DialogTitle>Add Goal</DialogTitle></DialogHeader>
+                  <AddGoalForm onSubmit={(g)=>addGoal(g)} />
+                </DialogContent>
+              </Dialog>
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-4">
+              {goals.map(g => {
+                const pct = Math.min(100, Math.round((Number(g.saved||0)/Number(g.target||1))*100));
+                return (
+                  <Card key={g.id} className="border-l-4 border-l-rose-500">
+                    <CardHeader className="flex items-center justify-between flex-row">
+                      <CardTitle className="text-base flex items-center gap-2"><Target className="h-4 w-4"/>{g.name}</CardTitle>
+                      <Button size="icon" variant="ghost" onClick={()=>delGoal(g.id)}><Trash2 className="h-4 w-4"/></Button>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      <div className="text-sm text-zinc-600">Deadline: {g.deadline}</div>
+                      <div className="h-3 bg-zinc-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-rose-500 to-pink-600" style={{width:`${pct}%`}}/>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <div>Saved: {currency(g.saved, profile.currency)}</div>
+                        <div>Target: {currency(g.target, profile.currency)}</div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="col-span-2">
+                          <Input type="number" placeholder="Add amount" onKeyDown={(e)=>{
+                            if(e.key==='Enter'){
+                              const val = Number(e.currentTarget.value||0);
+                              updateGoal(g.id, { saved: Number(g.saved||0) + val });
+                              e.currentTarget.value = "";
+                            }
+                          }}/>
+                        </div>
+                        <Button onClick={()=>updateGoal(g.id, { saved: 0 })} variant="outline">Reset</Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          </TabsContent>
+
+          {/* RECURRING */}
+          <TabsContent value="recurring" className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold flex items-center gap-2"><Repeat className="h-4 w-4"/>Recurring Monthly Transactions</h2>
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button className="gap-2"><Plus className="h-4 w-4"/>Add Recurring</Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader><DialogTitle>Add Recurring Monthly</DialogTitle></DialogHeader>
+                  <AddRecurringForm accounts={accounts} groups={groups} onSubmit={(r)=>addRecurring(r)} />
+                </DialogContent>
+              </Dialog>
+            </div>
+
+            <Card>
+              <CardContent className="p-0">
+                <div className="grid grid-cols-12 gap-2 px-4 py-3 border-b text-xs font-medium text-zinc-600">
+                  <div className="col-span-3">Name</div>
+                  <div className="col-span-1">Type</div>
+                  <div className="col-span-2">Amount</div>
+                  <div className="col-span-2">Day</div>
+                  <div className="col-span-2">Account</div>
+                  <div className="col-span-1">Enabled</div>
+                  <div className="col-span-1"/>
+                </div>
+                {recurring.length===0 && <div className="px-4 py-6 text-sm text-zinc-500">No recurring rules yet. Add one!</div>}
+                {recurring.map(r => (
+                  <div key={r.id} className="grid grid-cols-12 gap-2 px-4 py-3 border-b items-center">
+                    <div className="col-span-3">{r.name}{r.note?` — ${r.note}`:""}</div>
+                    <div className="col-span-1 capitalize">{r.type}</div>
+                    <div className="col-span-2">{currency(r.amount, profile.currency)}</div>
+                    <div className="col-span-2">{r.dayOfMonth}</div>
+                    <div className="col-span-2">{accounts.find(a=>a.id===r.accountId)?.name || "—"}</div>
+                    <div className="col-span-1"><Switch checked={!!r.isEnabled} onCheckedChange={(v)=>updateRecurring(r.id,{isEnabled:v})}/></div>
+                    <div className="col-span-1 flex justify-end"><Button size="icon" variant="ghost" onClick={()=>delRecurring(r.id)}><Trash2 className="h-4 w-4"/></Button></div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+
+            <Card className="border-l-4 border-l-sky-500">
+              <CardHeader><CardTitle>How it works</CardTitle></CardHeader>
+              <CardContent className="text-sm text-zinc-600 space-y-2">
+                <p>Each month you select at the top, enabled recurring items are automatically created on their set day. If a generated transaction already exists for that month/day, it won’t be duplicated.</p>
+                <p>Change the month to trigger generation for that month. You can safely edit or delete the generated transactions later.</p>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* CATEGORIES (Settings) */}
+          <TabsContent value="settings" className="space-y-4">
+            <h2 className="text-lg font-semibold">Categories & Groups</h2>
+            <div className="grid gap-4">
+              {groups.map(g => (
+                <Card key={g.id} className="border-t-4 border-t-indigo-500">
+                  <CardHeader className="flex flex-row items-center justify-between">
+                    <CardTitle className="text-base">{g.name}</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <div className="grid grid-cols-12 gap-2 text-xs text-zinc-600">
+                      <div className="col-span-6">Category</div>
+                      <div className="col-span-3">Budget</div>
+                      <div className="col-span-3"/>
+                    </div>
+                    {g.categories.map(c => (
+                      <div key={c.id} className="grid grid-cols-12 gap-2 items-center">
+                        <div className="col-span-6">{c.name}</div>
+                        <div className="col-span-3">{currency(c.budget, profile.currency)}</div>
+                        <div className="col-span-3 flex justify-end"><Button size="icon" variant="ghost" onClick={()=>delCategory(c.id)}><Trash2 className="h-4 w-4"/></Button></div>
+                      </div>
+                    ))}
+                    <Dialog>
+                      <DialogTrigger asChild>
+                        <Button variant="secondary" className="gap-2"><Plus className="h-4 w-4"/>Add Category</Button>
+                      </DialogTrigger>
+                      <DialogContent>
+                        <DialogHeader><DialogTitle>Add Category to {g.name}</DialogTitle></DialogHeader>
+                        <AddCategoryForm onSubmit={(name,budget)=>addCategory(g.id, name, budget)} />
+                      </DialogContent>
+                    </Dialog>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </TabsContent>
+        </Tabs>
+
+        <footer className="mt-10 text-xs text-zinc-500">
+          <div>Built with ♥ for personal use. Data stays in your browser.</div>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------
+// Small Forms
+// ------------------------------
+function AddGroupForm({ onSubmit }:{ onSubmit:(name:string)=>void }){
+  const [name, setName] = useState("");
+  return (
+    <div className="grid gap-3">
+      <div>
+        <Label>Group Name</Label>
+        <Input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Essentials"/>
+      </div>
+      <div className="flex justify-end gap-2">
+        <Button variant="secondary" onClick={()=>setName("")}>Clear</Button>
+        <Button onClick={()=>{ onSubmit(name || "New Group"); }}>Save</Button>
+      </div>
+    </div>
+  );
+}
+
+function AddCategoryForm({ onSubmit }:{ onSubmit:(name:string, budget:number)=>void }){
+  const [name, setName] = useState("");
+  const [budget, setBudget] = useState(0);
+  return (
+    <div className="grid gap-3">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label>Name</Label>
+          <Input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Groceries"/>
+        </div>
+        <div>
+          <Label>Monthly Budget</Label>
+          <Input type="number" value={budget} onChange={e=>setBudget(Number(e.target.value||0))}/>
+        </div>
+      </div>
+      <div className="flex justify-end gap-2">
+        <Button variant="secondary" onClick={()=>{setName(""); setBudget(0);}}>Clear</Button>
+        <Button onClick={()=>onSubmit(name||"New Category", Number(budget||0))}>Save</Button>
+      </div>
+    </div>
+  );
+}
+
+function AddAccountForm({ onSubmit }:{ onSubmit:(a:any)=>void }){
+  const [name, setName] = useState("");
+  const [type, setType] = useState("Bank");
+  const [balance, setBalance] = useState(0);
+  return (
+    <div className="grid gap-3">
+      <div className="grid grid-cols-3 gap-3">
+        <div>
+          <Label>Name</Label>
+          <Input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Current Account"/>
+        </div>
+        <div>
+          <Label>Type</Label>
+          <Select value={type} onValueChange={setType}>
+            <SelectTrigger><SelectValue/></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="Bank">Bank</SelectItem>
+              <SelectItem value="Savings">Savings</SelectItem>
+              <SelectItem value="Credit">Credit</SelectItem>
+              <SelectItem value="Cash">Cash</SelectItem>
+              <SelectItem value="Investment">Investment</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <Label>Starting Balance</Label>
+          <Input type="number" value={balance} onChange={e=>setBalance(Number(e.target.value||0))}/>
+        </div>
+      </div>
+      <div className="flex justify-end gap-2">
+        <Button variant="secondary" onClick={()=>{setName(""); setType("Bank"); setBalance(0);}}>Clear</Button>
+        <Button onClick={()=>onSubmit({ name: name||"Account", type, balance })}>Save</Button>
+      </div>
+    </div>
+  );
+}
+
+function AddBillForm({ onSubmit }:{ onSubmit:(b:any)=>void }){
+  const [name, setName] = useState("");
+  const [amount, setAmount] = useState(0);
+  const [dueDay, setDueDay] = useState(1);
+  const [auto, setAuto] = useState(false);
+  return (
+    <div className="grid gap-3">
+      <div className="grid grid-cols-4 gap-3 items-end">
+        <div className="col-span-2">
+          <Label>Name</Label>
+          <Input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Internet"/>
+        </div>
+        <div>
+          <Label>Amount</Label>
+          <Input type="number" value={amount} onChange={e=>setAmount(Number(e.target.value||0))}/>
+        </div>
+        <div>
+          <Label>Due Day</Label>
+          <Input type="number" min={1} max={31} value={dueDay} onChange={e=>setDueDay(Number(e.target.value||1))}/>
+        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <input id="auto" type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)} />
+        <Label htmlFor="auto">Auto payment</Label>
+      </div>
+      <div className="flex justify-end gap-2">
+        <Button variant="secondary" onClick={()=>{setName(""); setAmount(0); setDueDay(1); setAuto(false);}}>Clear</Button>
+        <Button onClick={()=>onSubmit({ name: name||"Bill", amount, dueDay, auto })}>Save</Button>
+      </div>
+    </div>
+  );
+}
+
+function AddGoalForm({ onSubmit }:{ onSubmit:(g:any)=>void }){
+  const [name, setName] = useState("");
+  const [target, setTarget] = useState(1000);
+  const [saved, setSaved] = useState(0);
+  const [deadline, setDeadline] = useState(new Date().getFullYear()+"-12-31");
+  return (
+    <div className="grid gap-3">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label>Name</Label>
+          <Input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Emergency Fund"/>
+        </div>
+        <div>
+          <Label>Deadline</Label>
+          <Input type="date" value={deadline} onChange={e=>setDeadline(e.target.value)}/>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label>Target</Label>
+          <Input type="number" value={target} onChange={e=>setTarget(Number(e.target.value||0))}/>
+        </div>
+        <div>
+          <Label>Initial Saved</Label>
+          <Input type="number" value={saved} onChange={e=>setSaved(Number(e.target.value||0))}/>
+        </div>
+      </div>
+      <div className="flex justify-end gap-2">
+        <Button variant="secondary" onClick={()=>{setName(""); setTarget(1000); setSaved(0);}}>Clear</Button>
+        <Button onClick={()=>onSubmit({ name: name||"Goal", target, saved, deadline })}>Save</Button>
+      </div>
+    </div>
+  );
+}
+
+function AddRecurringForm({ onSubmit, accounts, groups }:{ onSubmit:(r:any)=>void, accounts:any[], groups:any[] }){
+  const [name, setName] = useState("");
+  const [type, setType] = useState("expense");
+  const [amount, setAmount] = useState(0);
+  const [dayOfMonth, setDayOfMonth] = useState(1);
+  const [accountId, setAccountId] = useState(accounts[0]?.id);
+  const [categoryId, setCategoryId] = useState(undefined);
+  const [note, setNote] = useState("");
+  return (
+    <div className="grid gap-3">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <Label>Name</Label>
+          <Input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Salary / Gym"/>
+        </div>
+        <div>
+          <Label>Type</Label>
+          <Select value={type} onValueChange={setType}>
+            <SelectTrigger><SelectValue/></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="income">Income</SelectItem>
+              <SelectItem value="expense">Expense</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        <div>
+          <Label>Amount</Label>
+          <Input type="number" value={amount} onChange={e=>setAmount(Number(e.target.value||0))}/>
+        </div>
+        <div>
+          <Label>Day of Month (1–31)</Label>
+          <Input type="number" min={1} max={31} value={dayOfMonth} onChange={e=>setDayOfMonth(Number(e.target.value||1))}/>
+        </div>
+        <div>
+          <Label>Account</Label>
+          <Select value={accountId} onValueChange={setAccountId}>
+            <SelectTrigger><SelectValue placeholder="Select account"/></SelectTrigger>
+            <SelectContent>
+              {accounts.map(a=> <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div>
+        <Label>Category (optional)</Label>
+        <Select value={categoryId} onValueChange={setCategoryId}>
+          <SelectTrigger><SelectValue placeholder="Select category"/></SelectTrigger>
+          <SelectContent>
+            {groups.flatMap(g=>g.categories.map(c=>({g:g.name, ...c}))).map(c => (
+              <SelectItem key={c.id} value={c.id}>{c.g} • {c.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div>
+        <Label>Note (optional)</Label>
+        <Input value={note} onChange={e=>setNote(e.target.value)} placeholder="e.g. Monthly / Standing Order"/>
+      </div>
+      <div className="flex justify-end gap-2">
+        <Button variant="secondary" onClick={()=>{setName(""); setType("expense"); setAmount(0); setDayOfMonth(1); setNote("");}}>Clear</Button>
+        <Button onClick={()=>onSubmit({ name: name||"Recurring", type, amount, dayOfMonth, accountId, categoryId, note, isEnabled: true })}>Save</Button>
+      </div>
+    </div>
+  );
+}
