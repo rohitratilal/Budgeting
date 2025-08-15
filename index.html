@@ -6,8 +6,8 @@
   <title>MyFinance – Personal Budgeting (Single File)</title>
   <!-- Tailwind CDN (for quick styling) -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Chart.js for charts -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Chart.js (pinned UMD build) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <!-- React + ReactDOM UMD -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -26,6 +26,15 @@
   <script type="text/babel">
     const { useState, useMemo, useEffect, useRef } = React;
 
+    // Ensure Chart.js has its controllers/scales registered (Chart.js v3+)
+    (function ensureChartRegistration(){
+      try {
+        if (window.Chart && Chart.register && Chart.registerables) {
+          Chart.register(...Chart.registerables);
+        }
+      } catch (e) { console.warn('Chart registration warning:', e); }
+    })();
+
     // ------------------------------
     // Utils
     // ------------------------------
@@ -33,12 +42,17 @@
     const todayISO = () => new Date().toISOString().slice(0,10);
     const currencyFmt = (n, c='£') => `${c}${Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})}`;
     const daysInMonth = (y, m) => new Date(y, m, 0).getDate(); // m=1..12
+    const toNumber = (x, fallback=0) => {
+      const n = Number(x); return Number.isFinite(n)? n : fallback;
+    };
 
     // CSV helpers
-    const sanitizeNote = s => String(s||"").replace(/[\r\n]+/g, ' ');
+    const sanitizeNote = s => String(s||"").replace(/[
+]+/g, ' ');
     const csvEscape = (val) => {
       const s = String(val ?? "");
-      return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+      return /[",
+]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
     };
     function parseCSVLine(line){
       const out=[]; let cur=""; let inQ=false; for(let i=0;i<line.length;i++){ const ch=line[i];
@@ -105,17 +119,18 @@
 
       const monthKey = profile.month; // YYYY-MM
       const monthTxns = useMemo(()=> transactions.filter(t => (t.date||'').slice(0,7)===monthKey), [transactions, monthKey]);
-      const monthIncome = useMemo(()=> monthTxns.filter(t=>t.type==='income').reduce((a,b)=>a+Number(b.amount),0), [monthTxns]);
-      const monthExpense = useMemo(()=> monthTxns.filter(t=>t.type==='expense').reduce((a,b)=>a+Number(b.amount),0), [monthTxns]);
+      const monthIncome = useMemo(()=> monthTxns.filter(t=>t.type==='income').reduce((a,b)=>a+toNumber(b.amount),0), [monthTxns]);
+      const monthExpense = useMemo(()=> monthTxns.filter(t=>t.type==='expense').reduce((a,b)=>a+toNumber(b.amount),0), [monthTxns]);
 
       // category spend map
       const categorySpend = useMemo(()=>{
         const map={};
-        for(const g of groups){ for(const c of g.categories){ map[c.id]={ name:c.name, budget:Number(c.budget||0), spent:0 }; } }
+        for(const g of groups){ for(const c of g.categories){ map[c.id]={ name:c.name, budget:toNumber(c.budget), spent:0 }; } }
         for(const t of monthTxns.filter(t=>t.type==='expense' && t.categoryId)){
-          if(map[t.categoryId]) map[t.categoryId].spent += Number(t.amount);
+          if(map[t.categoryId]) map[t.categoryId].spent += toNumber(t.amount);
         }
-        return Object.values(map);
+        // Ensure numeric
+        return Object.values(map).map(x=>({ name:x.name, budget:toNumber(x.budget), spent:toNumber(x.spent) }));
       },[groups, monthTxns]);
 
       const warnings = useMemo(()=>{
@@ -127,15 +142,15 @@
       // Net worth series (12 months)
       const netWorthSeries = useMemo(()=>{
         const months=[]; const start=new Date(); start.setMonth(start.getMonth()-11);
-        const base = accounts.reduce((a,b)=>a+Number(b.balance||0),0);
+        const base = accounts.reduce((a,b)=>a+toNumber(b.balance),0);
         let running = base;
         for(let i=0;i<12;i++){
           const d=new Date(start.getFullYear(), start.getMonth()+i, 1);
           const key=d.toISOString().slice(0,7);
           const delta = transactions.filter(t=> (t.date||'').slice(0,7)===key)
-            .reduce((a,b)=> a + (b.type==='income'?Number(b.amount):-Number(b.amount)), 0);
+            .reduce((a,b)=> a + (b.type==='income'?toNumber(b.amount):-toNumber(b.amount)), 0);
           running += delta;
-          months.push({ label: d.toLocaleString(undefined,{month:'short', year:'numeric'}), value: Number(running.toFixed(2)) });
+          months.push({ label: d.toLocaleString(undefined,{month:'short', year:'numeric'}), value: toNumber(running) });
         }
         return months;
       },[accounts, transactions]);
@@ -146,11 +161,11 @@
         const [y,m] = key.split('-').map(Number); const dim = daysInMonth(y,m);
         const toAdd=[];
         recurring.filter(r=>r.isEnabled).forEach(r=>{
-          const day=Math.min(Math.max(1, Number(r.dayOfMonth||1)),31);
+          const day=Math.min(Math.max(1, toNumber(r.dayOfMonth,1)),31);
           const actual = Math.min(day, dim);
           const date = `${key}-${String(actual).padStart(2,'0')}`;
           const exists = transactions.some(t => t.meta?.recurringId===r.id && (t.date||'').slice(0,10)===date);
-          if(!exists){ toAdd.push({ id:uid(), date, type:r.type, amount:Number(r.amount||0), accountId:r.accountId||undefined, categoryId:r.categoryId||undefined, note:r.note||r.name, meta:{recurringId:r.id} }); }
+          if(!exists){ toAdd.push({ id:uid(), date, type:r.type, amount:toNumber(r.amount), accountId:r.accountId||undefined, categoryId:r.categoryId||undefined, note:r.note||r.name, meta:{recurringId:r.id} }); }
         });
         if(toAdd.length) setTransactions(prev=>[...toAdd, ...prev]);
       }
@@ -163,8 +178,8 @@
       const delAccount = (id)=> setAccounts(prev=> prev.filter(a=>a.id!==id));
 
       const addGroup = (name)=> setGroups(prev=> [...prev, {id:uid(), name, categories:[]}]);
-      const addCategory = (groupId, name, budget=0)=> setGroups(prev=> prev.map(g=> g.id===groupId? {...g, categories:[...g.categories, {id:uid(), name, budget:Number(budget)}]}:g));
-      const updateCategoryBudget = (catId, budget)=> setGroups(prev=> prev.map(g=> ({...g, categories:g.categories.map(c=> c.id===catId? {...c, budget:Number(budget)}:c)})));
+      const addCategory = (groupId, name, budget=0)=> setGroups(prev=> prev.map(g=> g.id===groupId? {...g, categories:[...g.categories, {id:uid(), name, budget:toNumber(budget)}]}:g));
+      const updateCategoryBudget = (catId, budget)=> setGroups(prev=> prev.map(g=> ({...g, categories:g.categories.map(c=> c.id===catId? {...c, budget:toNumber(budget)}:c)})));
       const delCategory = (catId)=> setGroups(prev=> prev.map(g=> ({...g, categories:g.categories.filter(c=>c.id!==catId)})));
 
       const addBill = (b)=> setBills(prev=> [...prev, {id:uid(), ...b}]);
@@ -182,22 +197,25 @@
       function exportCSV(){
         const rows = [
           ['id','date','type','amount','accountId','categoryId','note'],
-          ...transactions.map(t=> [t.id, t.date, t.type, t.amount, t.accountId||'', t.categoryId||'', sanitizeNote(t.note)])
+          ...transactions.map(t=> [t.id, t.date, t.type, toNumber(t.amount), t.accountId||'', t.categoryId||'', sanitizeNote(t.note)])
         ];
-        const csv = rows.map(r=> r.map(csvEscape).join(',')).join('\n');
+        const csv = rows.map(r=> r.map(csvEscape).join(',')).join('
+');
         const blob = new Blob([csv], {type:'text/csv'}); const url = URL.createObjectURL(blob);
         const a=document.createElement('a'); a.href=url; a.download='myfinance-transactions.csv'; a.click(); URL.revokeObjectURL(url);
       }
       async function importCSV(file){
         const text = await file.text();
-        const lines = text.split(/\r?\n/).filter(Boolean);
+        const lines = text.split(/
+?
+/).filter(Boolean);
         if(!lines.length) return;
         const cols = parseCSVLine(lines[0]); const idx = (k)=> cols.indexOf(k);
         const parsed = lines.slice(1).map(line=>{ const p=parseCSVLine(line); return {
           id: p[idx('id')] || uid(),
           date: p[idx('date')] || todayISO(),
           type: p[idx('type')] || 'expense',
-          amount: Number(p[idx('amount')]||0),
+          amount: toNumber(p[idx('amount')]),
           accountId: p[idx('accountId')] || undefined,
           categoryId: p[idx('categoryId')] || undefined,
           note: p[idx('note')] || ''
@@ -209,13 +227,29 @@
       function NetWorthChart({data}){
         const ref = useRef(null); const chartRef = useRef(null);
         useEffect(()=>{
-          if(!ref.current) return;
+          if(!ref.current || !window.Chart) return;
           if(chartRef.current) chartRef.current.destroy();
           const ctx = ref.current.getContext('2d');
           chartRef.current = new Chart(ctx, {
             type:'line',
-            data:{ labels:data.map(d=>d.label), datasets:[{ label:'Net Worth', data:data.map(d=>d.value), fill:true, tension:0.3 }] },
-            options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}} }
+            data:{
+              labels:data.map(d=>d.label),
+              datasets:[{
+                label:'Net Worth',
+                data:data.map(d=> toNumber(d.value)),
+                fill:true,
+                tension:0.35,
+                borderColor:'#4f46e5',
+                backgroundColor:'rgba(99,102,241,0.25)',
+                pointRadius:0
+              }]
+            },
+            options:{
+              responsive:true,
+              maintainAspectRatio:false,
+              plugins:{legend:{display:false}},
+              scales:{ y:{ beginAtZero:false } }
+            }
           });
           return ()=>{ if(chartRef.current) chartRef.current.destroy(); };
         },[JSON.stringify(data)]);
@@ -225,16 +259,24 @@
       function BarChart({rows}){
         const ref = useRef(null); const chartRef = useRef(null);
         useEffect(()=>{
-          if(!ref.current) return;
+          if(!ref.current || !window.Chart) return;
           if(chartRef.current) chartRef.current.destroy();
           const ctx = ref.current.getContext('2d');
+          const labels = rows.map(r=>r.name);
+          const spent = rows.map(r=> toNumber(r.spent));
+          const budget = rows.map(r=> toNumber(r.budget));
           chartRef.current = new Chart(ctx, {
             type:'bar',
-            data:{ labels: rows.map(r=>r.name), datasets:[
-              { label:'Spent', data: rows.map(r=>r.spent) },
-              { label:'Budget', data: rows.map(r=>r.budget) }
+            data:{ labels, datasets:[
+              { label:'Spent', data: spent, backgroundColor:'#ef4444' },
+              { label:'Budget', data: budget, backgroundColor:'#0ea5e9' }
             ]},
-            options:{ responsive:true, maintainAspectRatio:false, scales:{ x:{ticks:{maxRotation:45, minRotation:0}}} }
+            options:{
+              responsive:true,
+              maintainAspectRatio:false,
+              scales:{ x:{ ticks:{ maxRotation:45, minRotation:0 } }, y:{ beginAtZero:true } },
+              plugins:{ legend:{ position:'bottom' } }
+            }
           });
           return ()=>{ if(chartRef.current) chartRef.current.destroy(); };
         },[JSON.stringify(rows)]);
@@ -285,21 +327,21 @@
             <SelectInput label="Account" value={accountId} onChange={setAccountId} options={[...accounts.map(a=>({value:a.id,label:a.name}))]} />
             <SelectInput label="Category (opt)" value={categoryId} onChange={setCategoryId} options={[{value:'',label:'—'}].concat(groups.flatMap(g=>g.categories.map(c=>({value:c.id,label:`${g.name} • ${c.name}`}))))} />
             <div className="md:col-span-4"><TextInput label="Note (opt)" value={note} onChange={setNote} /></div>
-            <div className="md:col-span-1 flex items-end"><Btn onClick={()=>{ onAdd({date, type, amount:Number(amount||0), accountId, categoryId:categoryId||undefined, note}); setAmount(''); setNote(''); }}>Add</Btn></div>
+            <div className="md:col-span-1 flex items-end"><Btn onClick={()=>{ onAdd({date, type, amount:toNumber(amount), accountId, categoryId:categoryId||undefined, note}); setAmount(''); setNote(''); }}>Add</Btn></div>
           </div>
         );
       }
 
       // TABS CONTENT
       function Dashboard(){
-        const leftToBudget = Math.max(0, monthIncome - categorySpend.reduce((a,b)=>a+b.budget,0));
+        const leftToBudget = Math.max(0, monthIncome - categorySpend.reduce((a,b)=>a+toNumber(b.budget),0));
         return (
           <div className="space-y-4">
             <div className="grid md:grid-cols-4 gap-4">
               <Card title="Income (month)" value={currencyFmt(monthIncome, profile.currency)} color="from-emerald-500 to-teal-600" />
               <Card title="Expenses (month)" value={currencyFmt(monthExpense, profile.currency)} color="from-rose-500 to-pink-600" />
               <Card title="Left to Budget" value={currencyFmt(leftToBudget, profile.currency)} color="from-sky-500 to-indigo-600" />
-              <Card title="Net Worth" value={currencyFmt(accounts.reduce((a,b)=>a+Number(b.balance||0),0)+transactions.reduce((a,b)=> a + (b.type==='income'?Number(b.amount):-Number(b.amount)),0), profile.currency)} color="from-violet-500 to-fuchsia-600" />
+              <Card title="Net Worth" value={currencyFmt(accounts.reduce((a,b)=>a+toNumber(b.balance),0)+transactions.reduce((a,b)=> a + (b.type==='income'?toNumber(b.amount):-toNumber(b.amount)),0), profile.currency)} color="from-violet-500 to-fuchsia-600" />
             </div>
 
             {warnings.length>0 && (
@@ -316,7 +358,7 @@
               </div>
               <div className="p-4 border rounded-lg bg-white">
                 <div className="font-medium mb-3">Spending by Category (This Month)</div>
-                <BarChart rows={categorySpend.map(c=>({name:c.name, spent:c.spent, budget:c.budget}))} />
+                <BarChart rows={categorySpend.map(c=>({name:c.name, spent:toNumber(c.spent), budget:toNumber(c.budget)}))} />
               </div>
             </div>
           </div>
@@ -336,7 +378,7 @@
                   <div className="p-4 space-y-2">
                     {g.categories.map(c=>{
                       const spent = (categorySpend.find(x=>x.name===c.name)?.spent)||0;
-                      const remaining = Number(c.budget||0)-spent;
+                      const remaining = toNumber(c.budget)-toNumber(spent);
                       return (
                         <div key={c.id} className="grid grid-cols-12 gap-2 items-center">
                           <div className="col-span-4">{c.name}</div>
@@ -346,13 +388,13 @@
                           </div>
                           <div className="col-span-2">
                             <div className="text-sm">Spent</div>
-                            <div className="text-zinc-600">{currencyFmt(spent, profile.currency)}</div>
+                            <div className="text-zinc-600">{currencyFmt(toNumber(spent), profile.currency)}</div>
                           </div>
                           <div className={`col-span-3 font-medium ${remaining<0?'text-red-600':'text-emerald-700'}`}>{remaining<0?'Over by ':'Left '}{currencyFmt(Math.abs(remaining), profile.currency)}</div>
                         </div>
                       );
                     })}
-                    <div className="pt-2"><AddCategoryButton onAdd={(name,budget)=>addCategory(g.id,name,budget)} /></div>
+                    <div className="pt-2"><AddCategoryButton onAdd={(name,budget)=>addCategory(g.id,name,toNumber(budget))} /></div>
                   </div>
                 </div>
               ))}
@@ -374,7 +416,7 @@
       function AddCategoryButton({onAdd}){
         return <Btn onClick={()=>{
           const name = prompt('Category name?','New Category');
-          if(!name) return; const budget = Number(prompt('Monthly budget?','0')||0);
+          if(!name) return; const budget = toNumber(prompt('Monthly budget?','0'));
           onAdd(name, budget);
         }} variant="outline">+ Add Category</Btn>;
       }
@@ -403,7 +445,7 @@
                   <div className="col-span-2 capitalize">{t.type}</div>
                   <div className="col-span-2">{accounts.find(a=>a.id===t.accountId)?.name || '—'}</div>
                   <div className="col-span-4 text-zinc-700">{(groups.flatMap(g=>g.categories).find(c=>c.id===t.categoryId)?.name)||'—'}{t.note?` — ${t.note}`:''}</div>
-                  <div className={`col-span-2 text-right ${t.type==='expense'?'text-red-600':'text-emerald-700'}`}>{t.type==='expense'?'-':'+'}{currencyFmt(t.amount, profile.currency)}</div>
+                  <div className={`col-span-2 text-right ${t.type==='expense'?'text-red-600':'text-emerald-700'}`}>{t.type==='expense'?'-':'+'}{currencyFmt(toNumber(t.amount), profile.currency)}</div>
                   <div className="col-span-12 text-right"><button onClick={()=>delTxn(t.id)} className="text-xs text-zinc-500 hover:text-red-600">Delete</button></div>
                 </div>
               ))}
@@ -420,7 +462,7 @@
               <Btn onClick={()=>{
                 const name=prompt('Account name?','New Account'); if(!name) return;
                 const type=prompt('Type? (Bank/Savings/Credit/Cash/Investment)','Bank')||'Bank';
-                const balance=Number(prompt('Starting balance?','0')||0);
+                const balance=toNumber(prompt('Starting balance?','0'));
                 addAccount({name,type,balance});
               }}>+ Add Account</Btn>
             </div>
@@ -432,7 +474,7 @@
                     <button onClick={()=>delAccount(a.id)} className="text-sm text-zinc-500 hover:text-red-600">Delete</button>
                   </div>
                   <div className="px-4 pb-4 text-sm text-zinc-600">Type: {a.type}</div>
-                  <div className="px-4 pb-4 text-2xl font-semibold">{currencyFmt(a.balance, profile.currency)}</div>
+                  <div className="px-4 pb-4 text-2xl font-semibold">{currencyFmt(toNumber(a.balance), profile.currency)}</div>
                 </div>
               ))}
             </div>
@@ -447,8 +489,8 @@
               <h2 className="text-lg font-semibold">Bills</h2>
               <Btn onClick={()=>{
                 const name=prompt('Bill name?','Internet'); if(!name) return;
-                const amount=Number(prompt('Amount?','0')||0);
-                const dueDay=Math.max(1, Math.min(31, Number(prompt('Due day (1-31)?','1')||1)));
+                const amount=toNumber(prompt('Amount?','0'));
+                const dueDay=Math.max(1, Math.min(31, toNumber(prompt('Due day (1-31)?','1'),1)));
                 const auto=confirm('Auto payment? OK=Yes, Cancel=No');
                 addBill({name,amount,dueDay,auto});
               }}>+ Add Bill</Btn>
@@ -464,7 +506,7 @@
               {bills.map(b=> (
                 <div key={b.id} className="grid grid-cols-12 gap-2 px-4 py-3 border-t items-center">
                   <div className="col-span-4">{b.name}</div>
-                  <div className="col-span-2">{currencyFmt(b.amount, profile.currency)}</div>
+                  <div className="col-span-2">{currencyFmt(toNumber(b.amount), profile.currency)}</div>
                   <div className="col-span-2">{b.dueDay}</div>
                   <div className="col-span-2">{b.auto?'Yes':'No'}</div>
                   <div className="col-span-2 text-right"><button onClick={()=>delBill(b.id)} className="text-sm text-zinc-500 hover:text-red-600">Delete</button></div>
@@ -481,7 +523,7 @@
                   return (
                     <div key={day} className="border rounded-md p-2 min-h-[64px] bg-white/60">
                       <div className="text-xs text-zinc-500">{d.toLocaleString(undefined,{day:'numeric', month:'short'})}</div>
-                      {due.map(b=> <div key={b.id} className="text-xs">• {b.name} {currencyFmt(b.amount, profile.currency)}</div>)}
+                      {due.map(b=> <div key={b.id} className="text-xs">• {b.name} {currencyFmt(toNumber(b.amount), profile.currency)}</div>)}
                     </div>
                   );
                 })}
@@ -498,15 +540,15 @@
               <h2 className="text-lg font-semibold">Savings & Debt Goals</h2>
               <Btn onClick={()=>{
                 const name=prompt('Goal name?','Emergency Fund'); if(!name) return;
-                const target=Number(prompt('Target?','1000')||0);
-                const saved=Number(prompt('Initial saved?','0')||0);
+                const target=toNumber(prompt('Target?','1000'));
+                const saved=toNumber(prompt('Initial saved?','0'));
                 const deadline=prompt('Deadline (YYYY-MM-DD)?', new Date().getFullYear()+'-12-31')||todayISO();
                 addGoal({name,target,saved,deadline});
               }}>+ Add Goal</Btn>
             </div>
             <div className="grid md:grid-cols-2 gap-4">
               {goals.map(g=>{
-                const pct = Math.min(100, Math.round((Number(g.saved||0)/Math.max(1,Number(g.target||1)))*100));
+                const pct = Math.min(100, Math.round((toNumber(g.saved)/Math.max(1,toNumber(g.target)))*100));
                 return (
                   <div key={g.id} className="border rounded-lg bg-white p-4">
                     <div className="flex items-center justify-between">
@@ -518,13 +560,13 @@
                       <div className="h-full bg-gradient-to-r from-rose-500 to-pink-600" style={{width:pct+'%'}}></div>
                     </div>
                     <div className="flex justify-between text-sm mt-2">
-                      <div>Saved: {currencyFmt(g.saved, profile.currency)}</div>
-                      <div>Target: {currencyFmt(g.target, profile.currency)}</div>
+                      <div>Saved: {currencyFmt(toNumber(g.saved), profile.currency)}</div>
+                      <div>Target: {currencyFmt(toNumber(g.target), profile.currency)}</div>
                     </div>
                     <div className="mt-3 flex gap-2">
                       <input type="number" placeholder="Add amount" className="flex-1 rounded-md border px-3 py-2" onKeyDown={(e)=>{
                         if(e.key==='Enter'){
-                          const val=Number(e.currentTarget.value||0); updateGoal(g.id, {saved:Number(g.saved||0)+val}); e.currentTarget.value='';
+                          const val=toNumber(e.currentTarget.value); updateGoal(g.id, {saved:toNumber(g.saved)+val}); e.currentTarget.value='';
                         }
                       }} />
                       <Btn variant="outline" onClick={()=>updateGoal(g.id,{saved:0})}>Reset</Btn>
@@ -544,11 +586,11 @@
               <h2 className="text-lg font-semibold">♻️ Recurring Monthly Transactions</h2>
               <Btn onClick={()=>{
                 const name=prompt('Name?','Salary / Gym'); if(!name) return;
-                const type=prompt('Type: income or expense','expense')||'expense';
-                const amount=Number(prompt('Amount?','0')||0);
-                const dayOfMonth=Math.max(1, Math.min(31, Number(prompt('Day of month (1-31)?','1')||1)));
+                const type=(prompt('Type: income or expense','expense')||'expense').toLowerCase()==='income'?'income':'expense';
+                const amount=toNumber(prompt('Amount?','0'));
+                const dayOfMonth=Math.max(1, Math.min(31, toNumber(prompt('Day of month (1-31)?','1'),1)));
                 const accountId=(accounts[0]?.id)||'';
-                const categoryId = prompt('Category id (optional). Leave blank if none','')||undefined;
+                const categoryId = (prompt('Category id (optional). Leave blank if none','')||'') || undefined;
                 const note = prompt('Note (optional)','')||'';
                 addRecurring({name,type,amount,dayOfMonth,accountId,categoryId,note,isEnabled:true});
               }}>+ Add Recurring</Btn>
@@ -568,7 +610,7 @@
                 <div key={r.id} className="grid grid-cols-12 gap-2 px-4 py-3 border-t items-center">
                   <div className="col-span-3">{r.name}{r.note?` — ${r.note}`:''}</div>
                   <div className="col-span-1 capitalize">{r.type}</div>
-                  <div className="col-span-2">{currencyFmt(r.amount, profile.currency)}</div>
+                  <div className="col-span-2">{currencyFmt(toNumber(r.amount), profile.currency)}</div>
                   <div className="col-span-2">{r.dayOfMonth}</div>
                   <div className="col-span-2">{accounts.find(a=>a.id===r.accountId)?.name || '—'}</div>
                   <div className="col-span-1"><input type="checkbox" checked={!!r.isEnabled} onChange={e=>updateRecurring(r.id,{isEnabled:e.target.checked})} /></div>
@@ -601,11 +643,11 @@
                     {g.categories.map(c=> (
                       <div key={c.id} className="grid grid-cols-12 gap-2 items-center">
                         <div className="col-span-6">{c.name}</div>
-                        <div className="col-span-3">{currencyFmt(c.budget, profile.currency)}</div>
+                        <div className="col-span-3">{currencyFmt(toNumber(c.budget), profile.currency)}</div>
                         <div className="col-span-3 text-right"><button onClick={()=>delCategory(c.id)} className="text-sm text-zinc-500 hover:text-red-600">Delete</button></div>
                       </div>
                     ))}
-                    <AddCategoryButton onAdd={(name,budget)=>addCategory(g.id,name,budget)} />
+                    <AddCategoryButton onAdd={(name,budget)=>addCategory(g.id,name,toNumber(budget))} />
                   </div>
                 </div>
               ))}
@@ -624,14 +666,22 @@
         );
       }
 
-      // Self-tests (console)
+      // Self-tests (console) – extended with chart smoke tests
       useEffect(()=>{
         try{
-          console.assert(sanitizeNote('a\nb')==='a b','Sanitize newlines');
+          console.assert(sanitizeNote('a
+b')==='a b','Sanitize newlines');
           console.assert(daysInMonth(2025,2)===28,'Feb 2025 days');
           const esc = csvEscape('a,b'); console.assert(/^".*"$/.test(esc),'CSV quote');
           const round = parseCSVLine(['a','b,c','d"e'].map(csvEscape).join(','));
           console.assert(round[1]==='b,c' && round[2]==='d"e', 'CSV roundtrip');
+          // Chart smoke tests
+          if (window.Chart) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const c = new Chart(ctx, { type:'bar', data:{labels:['A'], datasets:[{data:[1]}]} });
+            c.destroy();
+          }
           console.log('MyFinance single-file self-tests ✔');
         }catch(e){ console.error('Self-tests failed', e); }
       },[]);
